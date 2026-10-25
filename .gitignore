@@ -1,7 +1,8 @@
-# Secrets (keep the template)
+# Secrets (keep the template). .env is the settings file's old name.
+config.env
 .env
 .env.*
-!.env.example
+schedule.env
 cron.env
 
 # Runtime state and logs
@@ -22,7 +23,7 @@ tests/FINDINGS.md
 tests/LOG.md
 tests/VERIFY.md
 
-# OS files (Windows dev machine, macOS supported by install_cron.sh)
+# OS files (Windows dev machine, macOS supported by install.sh)
 Thumbs.db
 desktop.ini
 .DS_Store

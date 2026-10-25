@@ -106,6 +106,10 @@ class StateStore:
         entry = self._data["artists"].get(artist_id)
         return entry.get("checked_at", 0) if entry else 0
 
+    def last_checked_at(self) -> float:
+        """When any artist was last checked successfully (0 if never)."""
+        return max((entry.get("checked_at", 0) for entry in self._data["artists"].values()), default=0)
+
     def last_cost(self, artist_id: str) -> int | None:
         """How many Spotify calls the previous check of this artist took, or
         None if never recorded."""

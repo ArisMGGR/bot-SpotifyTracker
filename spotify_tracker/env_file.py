@@ -1,4 +1,4 @@
-"""Helper to update a single KEY=value line in a .env file in place."""
+"""Helper to update a single KEY=value line in a config.env file in place."""
 
 from pathlib import Path
 

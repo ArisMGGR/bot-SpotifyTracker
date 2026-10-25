@@ -10,10 +10,12 @@ from unittest import mock
 import requests
 
 from spotify_tracker import main, spotify_client
-from spotify_tracker.config import REPO_DIR
+from spotify_tracker.config import REPO_DIR, Config
+from spotify_tracker.discord_api import DiscordNotifier
 from spotify_tracker.main import check_artists, released_recently
 from spotify_tracker.spotify_client import SpotifyClient, SpotifyUnavailableError
 from spotify_tracker.state import StateStore
+from spotify_tracker.telegram import TelegramNotifier
 
 
 def _days_ago(days: int) -> str:
@@ -84,6 +86,27 @@ class _QuietProgress:
 
     def close(self):
         pass
+
+
+class MakeNotifierTest(unittest.TestCase):
+    def _config(self, notifier: str) -> Config:
+        return Config(
+            spotify_client_id="id",
+            spotify_client_secret="secret",
+            spotify_refresh_token="refresh",
+            notifier=notifier,
+            telegram_bot_token="tg",
+            telegram_chat_id="1",
+            discord_bot_token="dc",
+            discord_guild_id="2",
+            discord_user_id="3",
+            discord_channel_id="4",
+            appears_on_artists=frozenset(),
+        )
+
+    def test_picks_the_configured_notifier(self):
+        self.assertIsInstance(main.make_notifier(self._config("telegram")), TelegramNotifier)
+        self.assertIsInstance(main.make_notifier(self._config("discord")), DiscordNotifier)
 
 
 class CheckArtistsTest(unittest.TestCase):
@@ -188,6 +211,52 @@ class CheckArtistsTest(unittest.TestCase):
         # The run stops at the budget line rather than deferring each
         # remaining artist one by one.
         self.assertTrue(any("deferring the remaining 1 artists" in line for line in logs.output), logs.output)
+
+    def _summary(self, spotify) -> list[str]:
+        """The run's log messages from the per-artist summary on."""
+        with (
+            mock.patch.object(main.logger, "disabled", False),
+            self.assertLogs(main.logger, "INFO") as logs,
+        ):
+            check_artists(spotify, FakeTelegram(), self.state)
+        messages = [record.getMessage() for record in logs.records]
+        start = next(i for i, m in enumerate(messages) if m.startswith("Artists checked this run"))
+        return messages[start + 1 :]
+
+    def test_run_ends_with_each_checked_artist_its_release_and_last_check(self):
+        self._follow("a1", "Old Friend", known=set())
+        self._follow("a2", "Quiet One", known=set())
+        self._follow("a3", "Newcomer")
+        last = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.state.checked_at("a1")))
+        spotify = FakeSpotify({"a1": [_release("r1", "New Song", _days_ago(1))], "a3": []})
+
+        lines = self._summary(spotify)
+
+        self.assertEqual(
+            sorted(lines),
+            sorted([
+                f"Old Friend - New Song - {last}",
+                f"Quiet One -  - {last}",
+                "Newcomer -  - never",
+            ]),
+        )
+
+    def test_summary_is_logged_when_a_rate_limit_stops_the_run(self):
+        self._follow("a1", "First", known=set())
+        self._follow("a2", "Second", known=set())
+        spotify = FakeSpotify({"a1": []})
+        real_fetch = spotify.get_latest_releases
+
+        def fetch(artist_id):
+            if spotify.fetched:
+                raise main.SpotifyRateLimitError(60)
+            return real_fetch(artist_id)
+
+        spotify.get_latest_releases = fetch
+        with mock.patch.object(main, "record_penalty"):
+            lines = self._summary(spotify)
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("First -  - "), lines)
 
     def test_network_outage_stops_the_run_after_one_request(self):
         for i in range(3):

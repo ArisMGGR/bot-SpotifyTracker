@@ -7,10 +7,12 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Protocol
 
 from tqdm import tqdm
 
-from spotify_tracker.config import REPO_DIR, load_config
+from spotify_tracker.config import REPO_DIR, Config, load_config
+from spotify_tracker.discord_api import DiscordNotifier
 from spotify_tracker.spotify_client import (
     MAX_APPEARS_ON_CALLS,
     RELEASE_GROUPS,
@@ -45,7 +47,7 @@ logger = logging.getLogger("spotify_tracker")
 
 # Each run also writes a copy of its console output to a file in this
 # directory, one file per calendar day. Defaults are anchored at the
-# repository root (like the .env), not the working directory, so running from
+# repository root (like config.env), not the working directory, so running from
 # elsewhere can't silently start over with an empty state file.
 DEFAULT_LOG_DIR = REPO_DIR / "logs"
 DEFAULT_STATE_FILE = REPO_DIR / "state.json"
@@ -176,12 +178,57 @@ def record_penalty(state: StateStore, retry_after: int) -> None:
     )
 
 
+class Notifier(Protocol):
+    """TelegramNotifier or DiscordNotifier. Alerts are passed as Telegram HTML
+    (escaped text and <b> tags); DiscordNotifier converts them."""
+
+    def send_message(self, text: str) -> None: ...
+
+
+def make_notifier(config: Config) -> Notifier:
+    if config.notifier == "discord":
+        return DiscordNotifier(config.discord_bot_token, config.discord_channel_id)
+    return TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
+
+
+# (artist name, new releases alerted on, when last checked before this run;
+# 0 if never).
+CheckedArtist = tuple[str, list[str], float]
+
+
+def log_checked_artists(summary: list[CheckedArtist]) -> None:
+    """End the run's output with one line per artist it checked:
+    artist - new release(s) (empty if none) - last check before this one."""
+    if not summary:
+        return
+    logger.info("Artists checked this run (artist - new release - last check before this one):")
+    for name, releases, previous in summary:
+        last = time.strftime("%Y-%m-%d %H:%M", time.localtime(previous)) if previous else "never"
+        logger.info("%s - %s - %s", name, ", ".join(releases), last)
+
+
 def check_artists(
     spotify: SpotifyClient,
-    telegram: TelegramNotifier,
+    notifier: Notifier,
     state: StateStore,
     appears_on_artists: frozenset[str] = frozenset(),
 ) -> None:
+    summary: list[CheckedArtist] = []
+    try:
+        _check_artists(spotify, notifier, state, appears_on_artists, summary)
+    finally:
+        # Also when a rate limit or outage stops the run early.
+        log_checked_artists(summary)
+
+
+def _check_artists(
+    spotify: SpotifyClient,
+    notifier: Notifier,
+    state: StateStore,
+    appears_on_artists: frozenset[str],
+    summary: list[CheckedArtist],
+) -> None:
+    """check_artists' work; appends each artist it checks to summary."""
     penalty_left = state.rate_limited_until() - time.time()
     if penalty_left > 0:
         logger.warning(
@@ -237,6 +284,7 @@ def check_artists(
             display_name = artist["name"]
             progress.set_postfix_str(display_name)
             is_baseline = not state.has_artist(artist_id)
+            previous_check = state.checked_at(artist_id)
             with_appears_on = wants_appears_on(artist, appears_on_artists)
 
             # Once the day's budget can't cover even a plain check, stop: none
@@ -358,6 +406,7 @@ def check_artists(
                 state.set_api_calls_today(spotify.daily_calls)
                 state.save()
                 checked += 1
+                summary.append((display_name, [], previous_check))
                 logger.info(
                     "Baseline recorded for %s (%d releases, %d API calls)",
                     display_name,
@@ -371,7 +420,7 @@ def check_artists(
 
             # Build up the set to record as we go. A release becomes "known"
             # only once we've actually dealt with it: absorbed as old noise, or
-            # successfully notified. A release whose Telegram send fails is left
+            # successfully notified. A release whose alert fails to send is left
             # out, so it stays unknown and is retried on the next run instead of
             # being silently marked seen (which would drop the alert entirely).
             resolved_ids = set(known_ids)
@@ -380,6 +429,7 @@ def check_artists(
             # no market filter, Spotify can list one release under several
             # regional IDs; alert once and mark the duplicates known.
             alerted = set()
+            alerted_names = []
             for release in new_releases:
                 is_appears_on = release.get("album_group") == "appears_on"
                 if not released_recently(release.get("release_date")) or (
@@ -396,8 +446,9 @@ def check_artists(
                 if release_key in alerted:
                     resolved_ids.add(release["id"])
                     continue
-                # The message is sent as Telegram HTML, which rejects a bare
-                # "<" or "&", so every value from Spotify is escaped.
+                # The message is built as Telegram HTML, which rejects a bare
+                # "<" or "&", so every value from Spotify is escaped. (Discord
+                # gets it converted to markdown.)
                 artist_html = _escape(display_name)
                 release_html = _escape(release["name"])
                 release_kind = _escape(release.get("album_type") or "release")
@@ -418,18 +469,20 @@ def check_artists(
                     + _escape(release.get("external_urls", {}).get("spotify", ""))
                 )
                 try:
-                    telegram.send_message(message)
+                    notifier.send_message(message)
                 except Exception:
                     # Don't mark this release known: leaving it out means the
                     # next run retries the alert rather than dropping it.
                     logger.exception(
-                        "Failed to send Telegram alert for %s - %s; will retry next run",
+                        "Failed to send %s alert for %s - %s; will retry next run",
+                        type(notifier).__name__.removesuffix("Notifier"),
                         display_name,
                         release["name"],
                     )
                     continue
                 resolved_ids.add(release["id"])
                 alerted.add(release_key)
+                alerted_names.append(release["name"])
                 logger.info("Notified about new release: %s - %s", display_name, release["name"])
             if absorbed:
                 logger.info(
@@ -445,6 +498,7 @@ def check_artists(
             state.set_api_calls_today(spotify.daily_calls)
             state.save()
             checked += 1
+            summary.append((display_name, alerted_names, previous_check))
 
     if budget_deferred:
         logger.info(
@@ -458,7 +512,7 @@ def check_artists(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Track the artists you follow on Spotify and send a Telegram alert when they release new music."
+        description="Track the artists you follow on Spotify and send a Telegram or Discord alert when they release new music."
     )
     parser.add_argument(
         "--state-file",
@@ -490,7 +544,7 @@ def main() -> None:
         config.spotify_refresh_token,
         daily_call_limit=DAILY_CALL_LIMIT,
     )
-    telegram = TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
+    notifier = make_notifier(config)
     state = StateStore(Path(args.state_file))
 
     def run_once(catch_errors: bool) -> None:
@@ -504,7 +558,7 @@ def main() -> None:
         spotify.start_day(state.api_calls_today())
         calls_before = spotify.request_count
         try:
-            check_artists(spotify, telegram, state, config.appears_on_artists)
+            check_artists(spotify, notifier, state, config.appears_on_artists)
         except Exception:
             # Log the error while the day's file is still attached, so the
             # cause of a failed run is in logs/ in both modes.

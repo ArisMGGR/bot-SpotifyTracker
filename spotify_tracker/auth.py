@@ -61,7 +61,7 @@ def _wait_for_callback(port: int) -> tuple[str | None, str | None, str | None]:
         raise SystemExit(
             f"Spotify authorization failed: no browser redirect reached 127.0.0.1:{port} "
             f"within {CALLBACK_TIMEOUT // 60} minutes. On a machine without a browser, run the "
-            "login on your own computer and copy SPOTIFY_REFRESH_TOKEN into this machine's .env "
+            "login on your own computer and copy SPOTIFY_REFRESH_TOKEN into this machine's config.env "
             "(see README)."
         )
     return server.auth_code, server.auth_error, server.auth_state  # type: ignore[attr-defined]
