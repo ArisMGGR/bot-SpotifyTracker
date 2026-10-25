@@ -46,7 +46,7 @@ Discord, a bot also answers commands (`/check`, `/status`, ...) from you.
    [Discord](#discord)); press Enter to skip one. Then it offers to run the
    Spotify login, and for Discord, to install the bot's systemd service
    (see [Start the bot service](#3-start-the-bot-service)).
-   `./install_cron.sh` runs this step for you.
+   `./install.sh` runs this step for you.
    An existing `.env` from before the rename is renamed to `config.env`.
 
    Re-running it is safe: for each setting already in `config.env` it shows
@@ -198,7 +198,7 @@ last part of the artist's `open.spotify.com/artist/<ID>` link.
 
 From the repo root:
 ```bash
-./install_cron.sh
+./install.sh
 ```
 This does the full setup in one command:
 
@@ -208,51 +208,75 @@ This does the full setup in one command:
    offers to run the Spotify login and, for Discord, offers to install the
    bot service. Run from a non-interactive shell, it only creates the file
    and lists what's still missing.
-3. Installs a crontab entry that runs the check on a **~25-hour** cadence.
+3. Schedules the check on a **~25-hour** cadence. On a Linux machine with
+   systemd it installs the systemd timer `spotify-tracker-check.timer`
+   (asking for your sudo password to write it to `/etc/systemd/system`);
+   anywhere else (macOS, a container without systemd) it installs a crontab
+   entry instead.
 
-If the login can't finish here (a server without a browser), the cron job is
+If the login can't finish here (a server without a browser), the schedule is
 still installed; finish the login as described in setup step 6.
 
-To remove the schedule later:
+To remove the schedule later (whichever kind it is):
 ```bash
-./install_cron.sh --uninstall
+./install.sh --uninstall
 ```
 This leaves the Discord bot service alone; remove that with
 `./install_bot_service.sh --uninstall`.
 
-Other flags: `--no-venv` (skip venv/pip), `--no-setup` (skip the
-`config.env` setup and login), `--no-bot-service` (the setup doesn't ask
-about the Discord bot service), `--help`.
+Other flags: `--cron` (a crontab entry even where systemd is available),
+`--systemd` (the timer, failing if there's no systemd), `--no-venv` (skip
+venv/pip), `--no-setup` (skip the `config.env` setup and login),
+`--no-bot-service` (the setup doesn't ask about the Discord bot service),
+`--help`. Installing one kind of schedule removes the other, so only one
+ever runs.
 
-**Why 25 hours needs a wrapper.** Plain cron can't express "every 25 hours"
-— its fields are fixed clock times, so any attempt drifts. So the installed
-crontab entry actually polls **hourly** and calls `scripts/run_check.sh`,
+**Why 25 hours needs a wrapper.** Cron can't express "every 25 hours" — its
+fields are fixed clock times, so any attempt drifts. So the timer (or
+crontab entry) actually ticks **hourly** and calls `scripts/run_check.sh`,
 which performs a real check only once ~25 hours have elapsed since the last
-one (tracked in `state/last_cron_run`, with an `flock` so runs never
-overlap). The result is a genuine ~25h gap using nothing but standard cron.
-To change the interval, pass `CRON_INTERVAL_HOURS` to the installer, e.g.
-`CRON_INTERVAL_HOURS=12 ./install_cron.sh` (a positive whole number of hours;
-anything else makes the wrapper exit with an error in `logs/cron.log`).
-Re-running the installer without it goes back to 25 hours.
-The wrapper appends its output to `logs/cron.log` (recreating `logs/` if it
-was deleted); each run is also appended to that day's
+one (tracked in `state/last_scheduled_check`, with an `flock` so runs never
+overlap). To change the interval, pass `CHECK_INTERVAL_HOURS` to the
+installer, e.g. `CHECK_INTERVAL_HOURS=12 ./install.sh` (a positive whole
+number of hours; anything else makes the wrapper exit with an error in
+`logs/schedule.log`). Re-running the installer without it goes back to 25
+hours. The wrapper appends its output to `logs/schedule.log` (recreating
+`logs/` if it was deleted); each run is also appended to that day's
 `logs/<YYYY-MM-DD>.log` as usual.
 
 The wrapper needs `flock` (part of util-linux on Linux; `brew install flock`
 on macOS). Without it every scheduled run fails with an error in
-`logs/cron.log`, and the installer warns about it up front. Cron runs jobs
-with a minimal `PATH`, so the installer saves the `PATH` of the shell you ran
-`./install_cron.sh` from (and any `CRON_INTERVAL_HOURS`) to `cron.env` in the
-repo root, and the wrapper uses it; if you install `flock` (or move Python)
-later, re-run the installer so `cron.env` picks it up.
+`logs/schedule.log`, and the installer warns about it up front. Scheduled
+jobs run with a minimal `PATH`, so the installer saves the `PATH` of the
+shell you ran `./install.sh` from (and any `CHECK_INTERVAL_HOURS`) to
+`schedule.env` in the repo root, and the wrapper uses it; if you install
+`flock` (or move Python) later, re-run the installer so `schedule.env` picks
+it up.
 
 The scheduled job uses `./venv/bin/python` if present, otherwise the system
 `python3`.
 
-#### Manual cron
+#### Managing the systemd timer
 
-If you'd rather manage cron yourself, add a one-off check per run, e.g. every
-30 minutes:
+The timer `spotify-tracker-check.timer` starts
+`spotify-tracker-check.service` every hour, which runs
+`scripts/run_check.sh` as you, from the repo folder. A tick missed while the
+machine was off runs at the next boot. To install or update only the timer,
+run `./install_check_timer.sh` (`--uninstall` removes it, `--print` shows the
+unit files). To see when it next fires:
+```bash
+systemctl list-timers spotify-tracker-check.timer
+```
+To run a tick now (it still skips the check if it isn't due; use the bot's
+`/check`, or `venv/bin/python -m spotify_tracker.main`, to force one):
+```bash
+sudo systemctl start spotify-tracker-check.service
+```
+
+#### Managing it yourself
+
+If you'd rather schedule it yourself, run a one-off check each time, e.g.
+every 30 minutes from cron:
 ```
 */30 * * * * cd /path/to/bot-SpotifyNewTracks && venv/bin/python -m spotify_tracker.main >> tracker.log 2>&1
 ```
@@ -269,17 +293,23 @@ Keep these from the old copy and put them in the new repo root:
 - `state.json`: the releases already seen, the cached artist list, the
   day's API call count and any rate-limit wait. Without it every artist gets
   a new baseline and today's call budget starts again from 0.
-- Optionally `logs/`, `state/last_cron_run` (when the last scheduled check
-  ran) and `state/paused`.
+- Optionally `logs/`, `state/last_scheduled_check` (when the last scheduled
+  check ran) and `state/paused`.
 
-`venv/` and `cron.env` are rebuilt by `./install_cron.sh`, so don't copy
-them.
+Copies from an older version, which called these `state/last_cron_run` and
+`logs/cron.log`, are renamed when the installer or the next scheduled run
+finds them. `venv/` and `schedule.env` (`cron.env` in older versions) are
+rebuilt by `./install.sh`, so don't copy them. If the new copy is in a
+different folder, run the old copy's uninstall first (`./install.sh
+--uninstall`, or `./install_cron.sh --uninstall` in an older version, and
+`./install_bot_service.sh --uninstall`); then run `./install.sh` in the new
+one so the schedule and the bot point at it.
 
 ## Discord
 
 Alerts can go to a channel in your Discord server instead of Telegram. The
-scheduled checks still run from cron; a separate bot, running as a systemd
-service, answers commands from one Discord user (you).
+scheduled checks still run from the systemd timer (or cron); a separate
+bot, running as a systemd service, answers commands from one Discord user (you).
 
 ### 1. Create the bot
 

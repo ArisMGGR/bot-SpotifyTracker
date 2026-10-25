@@ -1,7 +1,7 @@
 """Interactive first-time setup: create config.env and run the Spotify login.
 
 Run with: python -m spotify_tracker.setup
-(install_cron.sh runs it for you.)
+(install.sh runs it for you.)
 
 0. Unless run with the project's own Python, creates ./venv if missing,
    installs requirements.txt into it and continues inside it (see

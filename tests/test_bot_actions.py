@@ -21,7 +21,7 @@ class _FakeProcess:
 
 class BotActionsTest(unittest.TestCase):
     """Every path points into a temporary directory, so the real state/,
-    state.json and cron.env are never touched."""
+    state.json and schedule.env are never touched."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -32,10 +32,10 @@ class BotActionsTest(unittest.TestCase):
             ("REPO_DIR", self.root),
             ("STATE_FILE", self.root / "state.json"),
             ("STATE_DIR", state_dir),
-            ("LOCK_FILE", state_dir / "cron.lock"),
+            ("LOCK_FILE", state_dir / "check.lock"),
             ("PAUSE_FILE", state_dir / "paused"),
-            ("STAMP_FILE", state_dir / "last_cron_run"),
-            ("CRON_ENV", self.root / "cron.env"),
+            ("STAMP_FILE", state_dir / "last_scheduled_check"),
+            ("SCHEDULE_ENV", self.root / "schedule.env"),
         ):
             patcher = mock.patch.object(bot_actions, name, path)
             patcher.start()
@@ -107,8 +107,8 @@ class BotActionsTest(unittest.TestCase):
             api_usage={"date": utc_today(), "count": 7},
         )
         (self.root / "state").mkdir()
-        (self.root / "state" / "last_cron_run").write_text(str(now - 3600), encoding="utf-8")
-        (self.root / "cron.env").write_text("PATH=/usr/bin\nCRON_INTERVAL_HOURS=12\n", encoding="utf-8")
+        (self.root / "state" / "last_scheduled_check").write_text(str(now - 3600), encoding="utf-8")
+        (self.root / "schedule.env").write_text("PATH=/usr/bin\nCHECK_INTERVAL_HOURS=12\n", encoding="utf-8")
 
         text = bot_actions.status_text("<#99>", now=now)
 
@@ -118,6 +118,17 @@ class BotActionsTest(unittest.TestCase):
         self.assertIn("Followed artists: 2", text)
         self.assertIn("Spotify API calls today: 7/100", text)
         self.assertIn("Alert channel: <#99>", text)
+
+    def test_status_reads_the_interval_under_its_old_name(self):
+        now = 1_800_000_000
+        self._write_state()
+        (self.root / "state").mkdir()
+        (self.root / "state" / "last_scheduled_check").write_text(str(now - 3600), encoding="utf-8")
+        (self.root / "schedule.env").write_text("PATH=/usr/bin\nCRON_INTERVAL_HOURS=6\n", encoding="utf-8")
+
+        text = bot_actions.status_text("<#99>", now=now)
+
+        self.assertIn(f"Next scheduled check: <t:{now - 3600 + 6 * 3600}:R>", text)
 
     def test_status_shows_a_pause_and_a_rate_limit(self):
         now = 1_800_000_000

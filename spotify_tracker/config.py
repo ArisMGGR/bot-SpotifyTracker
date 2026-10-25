@@ -15,7 +15,7 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = REPO_DIR / "config.env"
 # Its name before the rename. Still read when it's the only one there, so an
 # install that kept its old .env keeps working; spotify_tracker.setup (run by
-# install_cron.sh) renames it to config.env.
+# install.sh) renames it to config.env.
 LEGACY_ENV_PATH = REPO_DIR / ".env"
 TEMPLATE_PATH = REPO_DIR / "config.env.example"
 

@@ -3,7 +3,8 @@
 Run with: python -m spotify_tracker.discord_bot
 (install_bot_service.sh installs it as spotify-tracker-bot.service.)
 
-Cron keeps doing the scheduled checks; this only answers commands, and only
+The systemd check timer (or cron) keeps doing the scheduled checks; this
+only answers commands, and only
 from DISCORD_USER_ID, in the server DISCORD_GUILD_ID:
   /check           run a check now
   /status          last check, API calls used today, next scheduled check
