@@ -1,5 +1,7 @@
 # Secrets (keep the template). .env is the settings file's old name.
 config.env
+config.env.*
+!config.env.example
 .env
 .env.*
 schedule.env
