@@ -80,6 +80,22 @@ class BotActionsTest(unittest.TestCase):
         self.assertTrue(reply.startswith("Check finished."))
         self.assertIn("Run complete: checked all 2 artists", reply)
 
+    def test_run_check_reads_config_env_as_it_is_now(self):
+        # The bot loaded DISCORD_CHANNEL_ID=111 at start; /channel since
+        # wrote 222. The check must not inherit the stale value.
+        config_env = self.root / "config.env"
+        config_env.write_text("DISCORD_CHANNEL_ID=222\n", encoding="utf-8")
+        process = _FakeProcess("", 0)
+        with (
+            mock.patch.object(bot_actions, "env_path", return_value=config_env),
+            mock.patch.dict(os.environ, {"DISCORD_CHANNEL_ID": "111", "KEPT": "1"}),
+            mock.patch.object(bot_actions.asyncio, "create_subprocess_exec", return_value=process) as start,
+        ):
+            asyncio.run(bot_actions.run_check())
+        env = start.call_args.kwargs["env"]
+        self.assertNotIn("DISCORD_CHANNEL_ID", env)
+        self.assertEqual(env["KEPT"], "1")
+
     def test_run_check_reports_a_failed_check(self):
         process = _FakeProcess("", 1)
         with mock.patch.object(bot_actions.asyncio, "create_subprocess_exec", return_value=process):

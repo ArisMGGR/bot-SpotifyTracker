@@ -122,8 +122,17 @@ def main() -> None:
     if cfg.notifier != "discord":
         print("NOTIFIER in config.env isn't discord; run 'python -m spotify_tracker.setup' to switch.", file=sys.stderr)
         sys.exit(CONFIG_ERROR)
-    # discord.py logs through the root logger set up above.
-    TrackerBot(cfg).run(cfg.discord_bot_token, log_handler=None)
+    try:
+        bot = TrackerBot(cfg)
+    except ValueError:
+        print("DISCORD_GUILD_ID and DISCORD_USER_ID in config.env must be numeric IDs.", file=sys.stderr)
+        sys.exit(CONFIG_ERROR)
+    try:
+        # discord.py logs through the root logger set up above.
+        bot.run(cfg.discord_bot_token, log_handler=None)
+    except discord.LoginFailure as err:
+        print(f"Discord rejected DISCORD_BOT_TOKEN in config.env: {err}", file=sys.stderr)
+        sys.exit(CONFIG_ERROR)
 
 
 if __name__ == "__main__":

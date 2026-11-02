@@ -101,7 +101,13 @@ def missing_settings() -> list[str]:
     values = dotenv_values(config.ENV_PATH)
     names = ["SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "SPOTIFY_REFRESH_TOKEN"]
     names += config.NOTIFIER_SETTINGS[_notifier(values)]
-    return [name for name in names if _is_missing(values.get(name))]
+    missing = [name for name in names if _is_missing(values.get(name))]
+    # _notifier falls back to Telegram for an unknown value, but the check
+    # itself refuses to run with one, so it isn't complete either.
+    notifier = (values.get("NOTIFIER") or "").strip().lower()
+    if notifier and notifier not in config.NOTIFIERS:
+        missing.insert(0, "NOTIFIER")
+    return missing
 
 
 def _yes(prompt: str) -> bool:

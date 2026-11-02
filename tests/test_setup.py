@@ -86,6 +86,16 @@ class SetupTest(_SetupTestBase):
         self.assertEqual(self._values()["SPOTIFY_CLIENT_ID"], "kept")
         self.assertTrue((self.root / ".env").exists())
 
+    def test_an_unknown_notifier_is_not_complete(self):
+        (self.root / "config.env").write_text(
+            "SPOTIFY_CLIENT_ID=id\nSPOTIFY_CLIENT_SECRET=secret\nSPOTIFY_REFRESH_TOKEN=token\n"
+            "NOTIFIER=discrod\nTELEGRAM_BOT_TOKEN=bot\nTELEGRAM_CHAT_ID=1\n",
+            encoding="utf-8",
+        )
+        self._run(tty=False)
+        self.assertIn("Still missing", self.printed)
+        self.assertIn("NOTIFIER", self.printed)
+
     def test_prompts_for_placeholders_then_runs_the_login(self):
         login_main = self._run(
             tty=True,

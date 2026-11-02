@@ -64,7 +64,9 @@ class Config:
 
 def _require(name: str, missing: list[str]) -> str:
     value = os.getenv(name)
-    if not value:
+    # config.env.example's stand-in values ("your_...") count as unset, as in
+    # spotify_tracker.setup.
+    if not value or value.startswith("your_"):
         missing.append(name)
     return value or ""
 

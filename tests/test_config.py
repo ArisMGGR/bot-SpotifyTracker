@@ -4,7 +4,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from dotenv import dotenv_values
+
 from spotify_tracker import config, login
+from spotify_tracker.env_file import set_env_value
 from spotify_tracker.main import wants_appears_on
 
 REQUIRED = {
@@ -88,6 +91,16 @@ class EnvPathTest(unittest.TestCase):
                 self.assertEqual(config.env_path(), root / ".env")
                 (root / "config.env").write_text("X=2\n", encoding="utf-8")
                 self.assertEqual(config.env_path(), root / "config.env")
+
+    def test_set_env_value_updates_a_duplicated_key(self):
+        # A line pasted in by hand after the template's own: dotenv reads the
+        # last one, so both must get the new value.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.env"
+            path.write_text("SPOTIFY_REFRESH_TOKEN=\nX=1\nSPOTIFY_REFRESH_TOKEN=old\n", encoding="utf-8")
+            set_env_value(path, "SPOTIFY_REFRESH_TOKEN", "new")
+            self.assertEqual(dotenv_values(path)["SPOTIFY_REFRESH_TOKEN"], "new")
+            self.assertEqual(dotenv_values(path)["X"], "1")
 
     def test_login_writes_the_file_config_reads(self):
         with (

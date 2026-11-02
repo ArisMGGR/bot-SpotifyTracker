@@ -11,15 +11,15 @@ systemd check timer or cron runs hourly):
 """
 
 import asyncio
+import os
 import re
 import sys
 import time
-from pathlib import Path
 from typing import IO
 
 from dotenv import dotenv_values
 
-from spotify_tracker.config import REPO_DIR
+from spotify_tracker.config import REPO_DIR, env_path
 from spotify_tracker.state import StateStore
 
 STATE_FILE = REPO_DIR / "state.json"
@@ -81,11 +81,17 @@ async def run_check() -> str:
     if lock is None:
         return "A check is already running. Try again when it has finished."
     try:
+        # The bot's environment holds config.env as it was when the bot
+        # started, and the check's load_dotenv doesn't override it. Leave
+        # those settings out, so the check reads config.env as it is now
+        # (e.g. a channel picked with /channel since).
+        file_keys = dotenv_values(env_path()).keys()
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
             "spotify_tracker.main",
             cwd=REPO_DIR,
+            env={name: value for name, value in os.environ.items() if name not in file_keys},
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -109,11 +115,16 @@ def set_paused(paused: bool) -> None:
         PAUSE_FILE.unlink(missing_ok=True)
 
 
-def _interval_hours() -> int:
+def _interval_hours() -> int | None:
+    """The interval scripts/run_check.sh uses, or None if the saved one is
+    invalid (the wrapper then exits with an error on every tick)."""
     saved = dotenv_values(SCHEDULE_ENV) if SCHEDULE_ENV.exists() else {}
     # CRON_INTERVAL_HOURS is its name before the rename.
     value = saved.get("CHECK_INTERVAL_HOURS") or saved.get("CRON_INTERVAL_HOURS")
-    return int(value) if value and value.isdigit() and int(value) > 0 else DEFAULT_INTERVAL_HOURS
+    if not value:
+        return DEFAULT_INTERVAL_HOURS
+    # The wrapper's rule: a positive whole number without leading zeros.
+    return int(value) if re.fullmatch(r"[1-9][0-9]*", value) else None
 
 
 def _when(timestamp: float) -> str:
@@ -130,13 +141,18 @@ def status_text(channel_mention: str, now: float | None = None) -> str:
         lines.append("Scheduled checks: **paused** (/resume to restart them)")
     else:
         lines.append("Scheduled checks: running")
-        if STAMP_FILE.exists():
+        interval = _interval_hours()
+        if interval is None:
+            lines.append(
+                "Next scheduled check: none, CHECK_INTERVAL_HOURS in schedule.env is invalid (see logs/schedule.log)"
+            )
+        elif STAMP_FILE.exists():
             try:
                 last_run = int(STAMP_FILE.read_text(encoding="utf-8").strip())
             except ValueError:
                 last_run = 0
             if last_run:
-                due = last_run + _interval_hours() * 3600
+                due = last_run + interval * 3600
                 lines.append(f"Next scheduled check: {_when(max(due, now))}")
         else:
             lines.append("Next scheduled check: at the next hourly tick")

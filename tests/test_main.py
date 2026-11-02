@@ -198,6 +198,7 @@ class CheckArtistsTest(unittest.TestCase):
     def test_stops_when_budget_cannot_cover_another_artist(self):
         self._follow("a1", "One", known=set())
         self._follow("a2", "Two", known=set())
+        self._follow("a3", "Three", known=set())
         # Enough for exactly one more plain check (cost 2 + 1 spare).
         spotify = FakeSpotify({}, daily_calls=main.DAILY_CALL_LIMIT - main.ARTIST_CHECK_COST)
 
@@ -208,9 +209,11 @@ class CheckArtistsTest(unittest.TestCase):
             check_artists(spotify, FakeTelegram(), self.state)
 
         self.assertEqual(len(spotify.fetched), 1)
-        # The run stops at the budget line rather than deferring each
-        # remaining artist one by one.
-        self.assertTrue(any("deferring the remaining 1 artists" in line for line in logs.output), logs.output)
+        # The run stops at the budget line once, for both remaining artists,
+        # rather than deferring each remaining artist one by one.
+        budget_lines = [line for line in logs.output if "Daily budget nearly spent" in line]
+        self.assertEqual(len(budget_lines), 1, logs.output)
+        self.assertIn("deferring the remaining 2 artists", budget_lines[0])
 
     def _summary(self, spotify) -> list[str]:
         """The run's log messages from the per-artist summary on."""
