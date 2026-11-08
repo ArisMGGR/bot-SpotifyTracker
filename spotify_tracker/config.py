@@ -76,7 +76,8 @@ def load_client_credentials() -> tuple[str, str, str]:
     missing: list[str] = []
     client_id = _require("SPOTIFY_CLIENT_ID", missing)
     client_secret = _require("SPOTIFY_CLIENT_SECRET", missing)
-    redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI", DEFAULT_REDIRECT_URI)
+    # An empty SPOTIFY_REDIRECT_URI= line means unset, like the settings above.
+    redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI") or DEFAULT_REDIRECT_URI
 
     if missing:
         raise SystemExit(

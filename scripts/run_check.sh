@@ -128,4 +128,6 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] running check (>= ${INTERVAL_HOURS}h since 
 # attempt and we don't hammer the API every hour after a failure.
 echo "${now}" > "${STAMP_FILE}"
 
+# The check inherits the lock on fd 9; this tells it not to take it again.
+export SPOTIFY_TRACKER_CHECK_LOCKED=1
 exec "${PYTHON}" -m spotify_tracker.main "$@"

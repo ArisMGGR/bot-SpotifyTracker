@@ -55,7 +55,11 @@ for arg in "$@"; do
     esac
 done
 
-if [ -x "${REPO_DIR}/venv/bin/python" ]; then
+# Only installing (and printing) the unit needs Python; --uninstall doesn't.
+PYTHON=""
+if [ "${ACTION}" = uninstall ]; then
+    :
+elif [ -x "${REPO_DIR}/venv/bin/python" ]; then
     PYTHON="${REPO_DIR}/venv/bin/python"
 else
     PYTHON="$(command -v python3 || true)"
@@ -100,7 +104,7 @@ fi
 
 if ! command -v systemctl >/dev/null 2>&1; then
     echo "ERROR: systemctl not found; the bot service needs systemd (Linux)." >&2
-    echo "       Run the bot by hand instead: ${PYTHON} -m spotify_tracker.discord_bot" >&2
+    echo "       Run the bot by hand instead: ${PYTHON:-python3} -m spotify_tracker.discord_bot" >&2
     exit 1
 fi
 

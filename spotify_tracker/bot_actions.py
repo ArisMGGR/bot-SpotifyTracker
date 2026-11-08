@@ -39,6 +39,11 @@ REPLY_LOG_LINES = 15
 
 _LOG_LINE = re.compile(r"\[(INFO|WARNING|ERROR)\] (.*)")
 
+# Set for a check started while its parent already holds the check lock
+# (/check here, or scripts/run_check.sh), so spotify_tracker.main doesn't
+# try to take it a second time and skip itself.
+CHECK_LOCKED_ENV = "SPOTIFY_TRACKER_CHECK_LOCKED"
+
 
 def try_lock() -> IO | None:
     """Takes the check lock without waiting. Returns the open lock file (close
@@ -91,7 +96,10 @@ async def run_check() -> str:
             "-m",
             "spotify_tracker.main",
             cwd=REPO_DIR,
-            env={name: value for name, value in os.environ.items() if name not in file_keys},
+            env={
+                **{name: value for name, value in os.environ.items() if name not in file_keys},
+                CHECK_LOCKED_ENV: "1",
+            },
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -118,9 +126,16 @@ def set_paused(paused: bool) -> None:
 def _interval_hours() -> int | None:
     """The interval scripts/run_check.sh uses, or None if the saved one is
     invalid (the wrapper then exits with an error on every tick)."""
-    saved = dotenv_values(SCHEDULE_ENV) if SCHEDULE_ENV.exists() else {}
+    # Read line by line, as the wrapper does: not with dotenv, which strips
+    # quotes, spaces and comments that the wrapper keeps (and then rejects).
     # CRON_INTERVAL_HOURS is its name before the rename.
-    value = saved.get("CHECK_INTERVAL_HOURS") or saved.get("CRON_INTERVAL_HOURS")
+    value = ""
+    if SCHEDULE_ENV.exists():
+        for line in SCHEDULE_ENV.read_text(encoding="utf-8").splitlines():
+            if line.startswith("CHECK_INTERVAL_HOURS="):
+                value = line.removeprefix("CHECK_INTERVAL_HOURS=")
+            elif line.startswith("CRON_INTERVAL_HOURS="):
+                value = value or line.removeprefix("CRON_INTERVAL_HOURS=")
     if not value:
         return DEFAULT_INTERVAL_HOURS
     # The wrapper's rule: a positive whole number without leading zeros.

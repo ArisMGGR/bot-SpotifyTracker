@@ -95,6 +95,8 @@ class BotActionsTest(unittest.TestCase):
         env = start.call_args.kwargs["env"]
         self.assertNotIn("DISCORD_CHANNEL_ID", env)
         self.assertEqual(env["KEPT"], "1")
+        # /check holds the lock, so the check mustn't skip itself over it.
+        self.assertEqual(env[bot_actions.CHECK_LOCKED_ENV], "1")
 
     def test_run_check_reports_a_failed_check(self):
         process = _FakeProcess("", 1)
@@ -145,6 +147,19 @@ class BotActionsTest(unittest.TestCase):
         text = bot_actions.status_text("<#99>", now=now)
 
         self.assertIn(f"Next scheduled check: <t:{now - 3600 + 6 * 3600}:R>", text)
+
+    def test_status_rejects_an_interval_the_wrapper_rejects(self):
+        # The wrapper reads schedule.env literally, so a quoted or padded
+        # value fails there; /status mustn't promise a check for it.
+        now = 1_800_000_000
+        self._write_state()
+        (self.root / "state").mkdir()
+        (self.root / "state" / "last_scheduled_check").write_text(str(now - 3600), encoding="utf-8")
+        for value in ('"12"', "12 ", "12 # twelve"):
+            with self.subTest(value=value):
+                (self.root / "schedule.env").write_text(f"PATH=/usr/bin\nCHECK_INTERVAL_HOURS={value}\n", encoding="utf-8")
+                text = bot_actions.status_text("<#99>", now=now)
+                self.assertIn("CHECK_INTERVAL_HOURS in schedule.env is invalid", text)
 
     def test_status_shows_a_pause_and_a_rate_limit(self):
         now = 1_800_000_000

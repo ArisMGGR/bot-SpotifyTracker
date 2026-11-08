@@ -4,14 +4,17 @@ import argparse
 import calendar
 import html
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
 
+from dotenv import dotenv_values
 from tqdm import tqdm
 
-from spotify_tracker.config import REPO_DIR, Config, load_config
+from spotify_tracker.bot_actions import CHECK_LOCKED_ENV, try_lock
+from spotify_tracker.config import REPO_DIR, Config, env_path, load_config
 from spotify_tracker.discord_api import DiscordNotifier
 from spotify_tracker.spotify_client import (
     MAX_APPEARS_ON_CALLS,
@@ -537,6 +540,7 @@ def main() -> None:
     args = parse_args()
     log_dir = Path(args.log_dir)
 
+    env_seen = dotenv_values(env_path())
     config = load_config()
     spotify = SpotifyClient(
         config.spotify_client_id,
@@ -545,14 +549,54 @@ def main() -> None:
         daily_call_limit=DAILY_CALL_LIMIT,
     )
     notifier = make_notifier(config)
-    state = StateStore(Path(args.state_file))
+
+    def refresh_settings() -> None:
+        """Re-reads config.env, which may have changed since the last run
+        (e.g. the Discord bot's /channel), and rebuilds the notifier."""
+        nonlocal env_seen, config, notifier
+        fresh = dotenv_values(env_path())
+        for key, value in fresh.items():
+            # Only settings that came from config.env: a variable set in the
+            # real environment still wins over the file, as at start-up.
+            if value is not None and os.environ.get(key) == env_seen.get(key):
+                os.environ[key] = value
+        env_seen = fresh
+        try:
+            config = load_config()
+        except SystemExit as err:
+            logger.error("config.env can't be used as it is now (%s); keeping the previous settings", err)
+            return
+        notifier = make_notifier(config)
 
     def run_once(catch_errors: bool) -> None:
+        # Hold the check lock, as the hourly wrapper and the bot's /check do,
+        # so this never overlaps another check (duplicate alerts, a lost call
+        # count). Skip the run if one is going; started by one of those two,
+        # the lock is already held for us.
+        lock = None
+        if not os.environ.get(CHECK_LOCKED_ENV):
+            lock = try_lock()
+            if lock is None:
+                logger.warning("Another check is running (state/check.lock is held); skipping this run")
+                return
+        try:
+            run_locked(catch_errors)
+        finally:
+            if lock is not None:
+                lock.close()
+
+    def run_locked(catch_errors: bool) -> None:
+        # Read state.json afresh every run: in --interval mode another
+        # process (the Discord bot's /check) may have written it since, and
+        # saving a copy loaded at start-up would undo its call count and
+        # baselines.
+        state = StateStore(Path(args.state_file))
         # Mirror this run's console output to the day's logs/<YYYY-MM-DD>.log.
         # check_artists persists state itself on every path that mutates it
         # (per artist, on penalty, and after refreshing the followed list);
         # the finally below persists the day's call total as a backstop.
         log_handler = _begin_run_log(log_dir)
+        refresh_settings()
         # Seed the day's running call total from state so the budget is
         # enforced across runs; api_calls_today resets itself on a new day.
         spotify.start_day(state.api_calls_today())
