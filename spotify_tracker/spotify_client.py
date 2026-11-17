@@ -9,7 +9,10 @@ Uses two separate token types:
 """
 
 import math
+import socket
+import ssl
 import time
+from urllib.parse import urlparse
 
 import requests
 
@@ -81,6 +84,58 @@ class SpotifyUnavailableError(Exception):
     toward the day's budget, so the caller must stop the run rather than
     skip to the next artist.
     """
+
+
+def _iter_causes(err: BaseException):
+    """Yield err and every exception wrapped inside it. requests buries the
+    real cause several layers deep (ConnectionError -> MaxRetryError ->
+    NameResolutionError -> socket.gaierror), linked through __cause__,
+    __context__, urllib3's .reason and the first positional arg."""
+    seen: set[int] = set()
+    stack = [err]
+    while stack:
+        current = stack.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        stack.append(current.__cause__)
+        stack.append(current.__context__)
+        reason = getattr(current, "reason", None)
+        if isinstance(reason, BaseException):
+            stack.append(reason)
+        if current.args and isinstance(current.args[0], BaseException):
+            stack.append(current.args[0])
+
+
+def describe_network_error(err: requests.RequestException) -> str:
+    """Explain in plain words why a request never got an answer, instead of
+    the multi-layer urllib3 message."""
+    request = getattr(err, "request", None)
+    host = urlparse(request.url).hostname if request is not None and request.url else None
+    host = host or "Spotify"
+    causes = list(_iter_causes(err))
+    names = {type(c).__name__ for c in causes}
+
+    if any(isinstance(c, socket.gaierror) for c in causes) or "NameResolutionError" in names:
+        return (
+            f"could not look up {host} (DNS lookup failed). This machine most likely had no "
+            "internet connection, or its DNS server wasn't answering, when the run started"
+        )
+    if isinstance(err, requests.ConnectTimeout):
+        return f"timed out connecting to {host}. The network is slow or down, or Spotify isn't responding"
+    if isinstance(err, requests.Timeout):
+        return f"{host} accepted the connection but didn't answer in time. Spotify may be having problems"
+    if isinstance(err, requests.exceptions.SSLError) or any(isinstance(c, ssl.SSLError) for c in causes):
+        return (
+            f"the secure (TLS) connection to {host} failed. Check the system clock, and whether "
+            "a proxy or captive portal (e.g. a hotel/public Wi-Fi login page) is intercepting traffic"
+        )
+    if any(isinstance(c, ConnectionRefusedError) for c in causes):
+        return f"{host} refused the connection. A firewall or proxy may be blocking it"
+    if any(isinstance(c, ConnectionResetError) for c in causes):
+        return f"the connection to {host} was cut off mid-request. The network dropped or is unstable"
+    return f"network error reaching {host} ({type(err).__name__}). Check the internet connection"
 
 
 class AppearsOnBudgetError(Exception):
@@ -173,7 +228,9 @@ class SpotifyClient:
         try:
             response = requests.request(method, url, timeout=15, **kwargs)
         except (requests.ConnectionError, requests.Timeout) as err:
-            raise SpotifyUnavailableError(f"Spotify unreachable: {type(err).__name__}: {err}") from err
+            # The traceback chain is kept (from err) for debugging, but the
+            # message itself says what went wrong in plain words.
+            raise SpotifyUnavailableError(f"Spotify unreachable: {describe_network_error(err)}") from err
         finally:
             # A failed request still reached (or tried to reach) Spotify, so it
             # counts for pacing too; otherwise retries after a failure would go
@@ -196,9 +253,15 @@ class SpotifyClient:
         if not response.ok:
             # Spotify's body says why (e.g. "invalid_grant": the refresh token
             # was revoked), which a bare "400 Bad Request" doesn't.
-            raise SpotifyUnavailableError(
-                f"Spotify token request ({data['grant_type']}) failed: {response.status_code} {response.text}"
-            )
+            message = f"Spotify token request ({data['grant_type']}) failed: {response.status_code} {response.text}"
+            if "invalid_grant" in response.text:
+                message += (
+                    ". The saved Spotify login was revoked or has expired; this won't fix itself. "
+                    "Log in again with: python -m spotify_tracker.login"
+                )
+            elif "invalid_client" in response.text:
+                message += ". The Spotify client ID or secret in config.env is wrong"
+            raise SpotifyUnavailableError(message)
         return response.json()
 
     def _get_app_token(self) -> str:

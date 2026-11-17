@@ -388,7 +388,7 @@ def _check_artists(
                 # saved; the run fails and the next one resumes from here.
                 progress.close()
                 logger.error(
-                    "Spotify unavailable; stopping: %d/%d artists checked", checked, len(artists)
+                    "Spotify unavailable; stopping after %d/%d artists checked", checked, len(artists)
                 )
                 raise
             except Exception:
@@ -603,6 +603,17 @@ def main() -> None:
         calls_before = spotify.request_count
         try:
             check_artists(spotify, notifier, state, config.appears_on_artists)
+        except SpotifyUnavailableError as err:
+            # An expected outage (no internet, DNS down, revoked token), not
+            # a bug: say what happened and what to expect, without a
+            # traceback. Checked artists are already saved.
+            logger.error("Run stopped early: %s", err)
+            logger.error(
+                "The artists checked so far are saved; the next run that can reach Spotify "
+                "picks up the rest."
+            )
+            if not catch_errors:
+                raise SystemExit(1)
         except Exception:
             # Log the error while the day's file is still attached, so the
             # cause of a failed run is in logs/ in both modes.

@@ -91,6 +91,39 @@ class RequestTest(unittest.TestCase):
 
         self.assertIn("invalid_grant", str(ctx.exception))
         self.assertIn("400", str(ctx.exception))
+        self.assertIn("python -m spotify_tracker.login", str(ctx.exception))
+
+    def test_dns_failure_is_explained_in_plain_words(self):
+        # The exact chain requests raises when the machine is offline.
+        import socket
+
+        from urllib3.connection import HTTPSConnection
+        from urllib3.exceptions import MaxRetryError, NameResolutionError
+
+        host = "api.spotify.com"
+        try:
+            try:
+                raise socket.gaierror(-3, "Temporary failure in name resolution")
+            except socket.gaierror as gai:
+                raise NameResolutionError(host, HTTPSConnection(host), gai) from gai
+        except NameResolutionError as nre:
+            retry = MaxRetryError(None, "/v1/x", nre)
+        err = requests.ConnectionError(retry, request=requests.Request("GET", f"https://{host}/v1/x").prepare())
+
+        with mock.patch.object(spotify_client.requests, "request", side_effect=err):
+            with self.assertRaises(SpotifyUnavailableError) as ctx:
+                self.client.get_latest_releases("a1")
+
+        message = str(ctx.exception)
+        self.assertIn("DNS lookup failed", message)
+        self.assertIn("api.spotify.com", message)
+        self.assertNotIn("HTTPSConnectionPool", message)
+
+    def test_timeout_is_explained_in_plain_words(self):
+        with mock.patch.object(spotify_client.requests, "request", side_effect=requests.ReadTimeout("slow")):
+            with self.assertRaises(SpotifyUnavailableError) as ctx:
+                self.client.get_latest_releases("a1")
+        self.assertIn("didn't answer in time", str(ctx.exception))
 
 
 if __name__ == "__main__":
