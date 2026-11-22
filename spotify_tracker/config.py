@@ -64,7 +64,9 @@ class Config:
 
 def _require(name: str, missing: list[str]) -> str:
     value = os.getenv(name)
-    if not value:
+    # config.env.example's stand-in values ("your_...") count as unset, as in
+    # spotify_tracker.setup.
+    if not value or value.startswith("your_"):
         missing.append(name)
     return value or ""
 
@@ -74,7 +76,8 @@ def load_client_credentials() -> tuple[str, str, str]:
     missing: list[str] = []
     client_id = _require("SPOTIFY_CLIENT_ID", missing)
     client_secret = _require("SPOTIFY_CLIENT_SECRET", missing)
-    redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI", DEFAULT_REDIRECT_URI)
+    # An empty SPOTIFY_REDIRECT_URI= line means unset, like the settings above.
+    redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI") or DEFAULT_REDIRECT_URI
 
     if missing:
         raise SystemExit(

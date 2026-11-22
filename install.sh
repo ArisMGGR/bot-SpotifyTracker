@@ -124,6 +124,14 @@ if [ "${SCHEDULER}" = auto ]; then
     fi
 fi
 
+# Checked before anything is set up, so a machine without cron fails here
+# with a clear message rather than after the setup.
+if [ "${SCHEDULER}" = cron ] && ! command -v crontab >/dev/null 2>&1; then
+    echo "ERROR: crontab not found, and this machine has no systemd for the timer." >&2
+    echo "       Install cron (or run on a machine with systemd), then re-run ./install.sh." >&2
+    exit 1
+fi
+
 # --- 0. Files from before the rename ----------------------------------------
 # Copied over from an older install; keep them working under the new names.
 migrate() {

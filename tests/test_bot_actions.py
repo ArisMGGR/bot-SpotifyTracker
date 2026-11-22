@@ -80,6 +80,24 @@ class BotActionsTest(unittest.TestCase):
         self.assertTrue(reply.startswith("Check finished."))
         self.assertIn("Run complete: checked all 2 artists", reply)
 
+    def test_run_check_reads_config_env_as_it_is_now(self):
+        # The bot loaded DISCORD_CHANNEL_ID=111 at start; /channel since
+        # wrote 222. The check must not inherit the stale value.
+        config_env = self.root / "config.env"
+        config_env.write_text("DISCORD_CHANNEL_ID=222\n", encoding="utf-8")
+        process = _FakeProcess("", 0)
+        with (
+            mock.patch.object(bot_actions, "env_path", return_value=config_env),
+            mock.patch.dict(os.environ, {"DISCORD_CHANNEL_ID": "111", "KEPT": "1"}),
+            mock.patch.object(bot_actions.asyncio, "create_subprocess_exec", return_value=process) as start,
+        ):
+            asyncio.run(bot_actions.run_check())
+        env = start.call_args.kwargs["env"]
+        self.assertNotIn("DISCORD_CHANNEL_ID", env)
+        self.assertEqual(env["KEPT"], "1")
+        # /check holds the lock, so the check mustn't skip itself over it.
+        self.assertEqual(env[bot_actions.CHECK_LOCKED_ENV], "1")
+
     def test_run_check_reports_a_failed_check(self):
         process = _FakeProcess("", 1)
         with mock.patch.object(bot_actions.asyncio, "create_subprocess_exec", return_value=process):
@@ -129,6 +147,19 @@ class BotActionsTest(unittest.TestCase):
         text = bot_actions.status_text("<#99>", now=now)
 
         self.assertIn(f"Next scheduled check: <t:{now - 3600 + 6 * 3600}:R>", text)
+
+    def test_status_rejects_an_interval_the_wrapper_rejects(self):
+        # The wrapper reads schedule.env literally, so a quoted or padded
+        # value fails there; /status mustn't promise a check for it.
+        now = 1_800_000_000
+        self._write_state()
+        (self.root / "state").mkdir()
+        (self.root / "state" / "last_scheduled_check").write_text(str(now - 3600), encoding="utf-8")
+        for value in ('"12"', "12 ", "12 # twelve"):
+            with self.subTest(value=value):
+                (self.root / "schedule.env").write_text(f"PATH=/usr/bin\nCHECK_INTERVAL_HOURS={value}\n", encoding="utf-8")
+                text = bot_actions.status_text("<#99>", now=now)
+                self.assertIn("CHECK_INTERVAL_HOURS in schedule.env is invalid", text)
 
     def test_status_shows_a_pause_and_a_rate_limit(self):
         now = 1_800_000_000

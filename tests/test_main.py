@@ -198,6 +198,7 @@ class CheckArtistsTest(unittest.TestCase):
     def test_stops_when_budget_cannot_cover_another_artist(self):
         self._follow("a1", "One", known=set())
         self._follow("a2", "Two", known=set())
+        self._follow("a3", "Three", known=set())
         # Enough for exactly one more plain check (cost 2 + 1 spare).
         spotify = FakeSpotify({}, daily_calls=main.DAILY_CALL_LIMIT - main.ARTIST_CHECK_COST)
 
@@ -208,9 +209,11 @@ class CheckArtistsTest(unittest.TestCase):
             check_artists(spotify, FakeTelegram(), self.state)
 
         self.assertEqual(len(spotify.fetched), 1)
-        # The run stops at the budget line rather than deferring each
-        # remaining artist one by one.
-        self.assertTrue(any("deferring the remaining 1 artists" in line for line in logs.output), logs.output)
+        # The run stops at the budget line once, for both remaining artists,
+        # rather than deferring each remaining artist one by one.
+        budget_lines = [line for line in logs.output if "Daily budget nearly spent" in line]
+        self.assertEqual(len(budget_lines), 1, logs.output)
+        self.assertIn("deferring the remaining 2 artists", budget_lines[0])
 
     def _summary(self, spotify) -> list[str]:
         """The run's log messages from the per-artist summary on."""
@@ -314,6 +317,118 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 1)
         [log_file] = log_dir.glob("*.log")
         self.assertIn("SENTINEL-CRASH", log_file.read_text(encoding="utf-8"))
+
+    def test_interval_runs_keep_what_another_process_saved_in_between(self):
+        # The bot's /check is a separate process; its baseline and call
+        # count must survive the polling loop's next save.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        state_file = Path(tmp.name) / "state.json"
+        argv = ["main", "--interval", "60", "--state-file", str(state_file), "--log-dir", str(Path(tmp.name) / "logs")]
+        env = {
+            "SPOTIFY_CLIENT_ID": "id",
+            "SPOTIFY_CLIENT_SECRET": "secret",
+            "SPOTIFY_REFRESH_TOKEN": "refresh",
+            "TELEGRAM_BOT_TOKEN": "bot",
+            "TELEGRAM_CHAT_ID": "1",
+        }
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) > 1:
+                raise KeyboardInterrupt
+            other = StateStore(state_file)
+            other.record_check("a1", "A", {"r1"})
+            other.set_api_calls_today(50)
+            other.save()
+
+        with (
+            mock.patch.dict(os.environ, env),
+            mock.patch("sys.argv", argv),
+            mock.patch.object(main, "check_artists"),
+            mock.patch.object(main.time, "sleep", sleep),
+            mock.patch.object(main.logger, "propagate", False),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                main.main()
+
+        saved = StateStore(state_file)
+        self.assertEqual(saved.known_release_ids("a1"), {"r1"})
+        self.assertEqual(saved.api_calls_today(), 50)
+
+    def test_interval_runs_use_the_channel_config_env_has_now(self):
+        # /channel rewrites DISCORD_CHANNEL_ID in config.env while the
+        # polling loop runs; the next run must alert there.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        config_env = Path(tmp.name) / "config.env"
+        settings = {
+            "SPOTIFY_CLIENT_ID": "id",
+            "SPOTIFY_CLIENT_SECRET": "secret",
+            "SPOTIFY_REFRESH_TOKEN": "refresh",
+            "NOTIFIER": "discord",
+            "DISCORD_BOT_TOKEN": "token",
+            "DISCORD_GUILD_ID": "1",
+            "DISCORD_USER_ID": "2",
+            "DISCORD_CHANNEL_ID": "111",
+        }
+        config_env.write_text("".join(f"{k}={v}\n" for k, v in settings.items()), encoding="utf-8")
+        argv = ["main", "--interval", "60", "--state-file", str(Path(tmp.name) / "state.json"), "--log-dir", str(Path(tmp.name) / "logs")]
+        channels = []
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) > 1:
+                raise KeyboardInterrupt
+            config_env.write_text(config_env.read_text(encoding="utf-8").replace("=111", "=222"), encoding="utf-8")
+
+        with (
+            # As config.py's load_dotenv left it at start-up.
+            mock.patch.dict(os.environ, settings, clear=True),
+            mock.patch("sys.argv", argv),
+            mock.patch.object(main, "env_path", return_value=config_env),
+            mock.patch.object(main, "check_artists", lambda spotify, notifier, *rest: channels.append(notifier._channel_id)),
+            mock.patch.object(main.time, "sleep", sleep),
+            mock.patch.object(main.logger, "propagate", False),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                main.main()
+
+        self.assertEqual(channels, ["111", "222"])
+
+    def _run_main_with_lock(self, lock, env: dict[str, str]) -> mock.Mock:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        argv = ["main", "--state-file", str(Path(tmp.name) / "state.json"), "--log-dir", str(Path(tmp.name) / "logs")]
+        settings = {
+            "SPOTIFY_CLIENT_ID": "id",
+            "SPOTIFY_CLIENT_SECRET": "secret",
+            "SPOTIFY_REFRESH_TOKEN": "refresh",
+            "TELEGRAM_BOT_TOKEN": "bot",
+            "TELEGRAM_CHAT_ID": "1",
+        }
+        with (
+            mock.patch.dict(os.environ, dict(settings, **env), clear=True),
+            mock.patch("sys.argv", argv),
+            mock.patch.object(main, "try_lock", return_value=lock) as try_lock,
+            mock.patch.object(main, "check_artists") as check,
+            mock.patch.object(main.logger, "propagate", False),
+        ):
+            main.main()
+        self.try_lock = try_lock
+        return check
+
+    def test_a_run_is_skipped_while_another_check_holds_the_lock(self):
+        check = self._run_main_with_lock(None, {})
+        check.assert_not_called()
+
+    def test_a_run_under_the_lock_holder_does_not_take_it_again(self):
+        # Started by scripts/run_check.sh or /check, which hold it already.
+        check = self._run_main_with_lock(None, {main.CHECK_LOCKED_ENV: "1"})
+        check.assert_called_once()
+        self.try_lock.assert_not_called()
 
 
 class ParseArgsTest(unittest.TestCase):

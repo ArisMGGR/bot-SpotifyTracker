@@ -1,5 +1,7 @@
 # Secrets (keep the template). .env is the settings file's old name.
 config.env
+config.env.*
+!config.env.example
 .env
 .env.*
 schedule.env
@@ -14,7 +16,7 @@ logs/
 
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
 venv/
 
@@ -22,6 +24,7 @@ venv/
 tests/FINDINGS.md
 tests/LOG.md
 tests/VERIFY.md
+tests/PASSES.md
 
 # OS files (Windows dev machine, macOS supported by install.sh)
 Thumbs.db
